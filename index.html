@@ -67,6 +67,9 @@ textarea{width:100%;min-height:280px;background:#0e0f14;color:var(--text);border
 .segBtn.on{background:var(--accent);color:#1a1405}
 .segBtn:active{transform:scale(.98)}
 select.btn{padding:6px 8px;font-size:13px}
+input.btn.txt{text-align:left;font-weight:500;cursor:text;min-width:0}
+input.btn.txt::placeholder{color:var(--muted)}
+#spWrap iframe{border-radius:12px;display:block}
 .viewWrap{position:relative}
 #gl{position:absolute;inset:0;width:100%;height:100%;border-radius:14px;display:none;touch-action:none;aspect-ratio:auto}
 .camBar,.camHint{display:none}
@@ -151,13 +154,18 @@ body.v3d .camHint{display:block;position:absolute;bottom:8px;left:0;right:0;text
     </details>
 
     <details class="card box" id="boxMusic">
-      <summary><span class="ttl">🎵 Eigene Musik</span><small>Song von deinem Gerät</small></summary>
+      <summary><span class="ttl">🎵 Eigene Musik</span><small>Datei oder Spotify</small></summary>
       <div class="boxBody">
         <div class="row">
           <label class="btn" style="flex:1">🎵 Song laden<input type="file" id="song" accept="audio/*" hidden></label>
           <button class="btn" id="tap" title="Tempo tippen">Tap</button>
           <button class="btn" id="one" title="Jetzt ist die 1">Eins!</button>
         </div>
+        <div class="row">
+          <input id="spUrl" class="btn txt" type="url" inputmode="url" placeholder="Spotify-Link (Song, Album, Playlist)" style="flex:1">
+          <button class="btn" id="spLoad">Spotify</button>
+        </div>
+        <div id="spWrap"></div>
         <div class="hint" id="songInfo">Kein Song – das Metronom läuft allein. Lade ein Salsa-Stück von deinem Gerät, das Tempo wird automatisch geschätzt; mit „Tap" korrigierst du es, mit „Eins!" setzt du die Phrase auf die 1.</div>
       </div>
     </details>
@@ -880,9 +888,15 @@ function speak(t) {
 
 // ---------- song ----------
 const info = t => { $('#songInfo').innerHTML = t; };
+function dropSong() {
+  if (!song) return;
+  try { song.el.pause(); } catch (e) {}
+  if (song.kind === 'spotify') { try { song.ctrl.destroy(); } catch (e) {} $('#spWrap').innerHTML = ''; }
+  else URL.revokeObjectURL(song.el.src);
+  song = null;
+}
 async function loadSong(file) {
-  setRunning(false);
-  if (song) { song.el.pause(); URL.revokeObjectURL(song.el.src); }
+  setRunning(false); dropSong();
   const el = new Audio(URL.createObjectURL(file)); el.preload = 'auto';
   el.addEventListener('ended', () => setRunning(false));
   song = { el, offset: 0, name: file.name };
@@ -895,11 +909,66 @@ async function loadSong(file) {
   $('#rmSong').addEventListener('click', removeSong);
 }
 function removeSong() {
-  setRunning(false);
-  if (song) { song.el.pause(); URL.revokeObjectURL(song.el.src); }
-  song = null; resetClock();
+  setRunning(false); dropSong(); resetClock();
   info('Kein Song – das Metronom läuft allein.');
 }
+// ---------- Spotify (offizieller Embed-Player, iFrame-API) ----------
+// Der Player meldet seine Abspielposition (ms); dazwischen wird lokal weitergezählt. Song.el bildet die Audio-Schnittstelle nach,
+// damit Start/Pause/Eins!/Beat-Sprünge genauso funktionieren wie bei einer lokalen Datei.
+let spApi = null, spApiLoading = null;
+function parseSpotify(t) {
+  t = (t || '').trim();
+  let m = /^spotify:(track|album|playlist|episode):([A-Za-z0-9]+)/.exec(t);
+  if (!m) m = /open\.spotify\.com\/(?:intl-[a-z-]+\/)?(?:embed\/)?(track|album|playlist|episode)\/([A-Za-z0-9]+)/.exec(t);
+  return m ? `spotify:${m[1]}:${m[2]}` : null;
+}
+function loadSpotifyApi() {
+  if (spApi) return Promise.resolve(spApi);
+  if (spApiLoading) return spApiLoading;
+  return spApiLoading = new Promise((res, rej) => {
+    window.onSpotifyIframeApiReady = api => { spApi = api; res(api); };
+    const sc = document.createElement('script'); sc.src = 'https://open.spotify.com/embed/iframe-api/v1'; sc.async = true;
+    sc.onerror = () => { spApiLoading = null; rej(new Error('blockiert')); };
+    document.head.appendChild(sc);
+    setTimeout(() => { if (!spApi) { spApiLoading = null; rej(new Error('Zeitüberschreitung')); } }, 12000);
+  });
+}
+async function loadSpotify(raw) {
+  const uri = parseSpotify(raw);
+  if (!uri) { info('Das sieht nicht nach einem Spotify-Link aus. Kopiere in Spotify „Teilen → Link kopieren" und füge ihn hier ein.'); return; }
+  setRunning(false); dropSong();
+  info('Lade Spotify-Player …');
+  let api;
+  try { api = await loadSpotifyApi(); }
+  catch (e) { info('Der Spotify-Player kann hier nicht geladen werden (' + esc(e.message) + '). In der Claude-Vorschau sind externe Player gesperrt – auf der GitHub-Page funktioniert es.'); return; }
+  const wrap = $('#spWrap'); wrap.innerHTML = '<div id="spEl"></div>';
+  api.createController(document.getElementById('spEl'), { uri, width: '100%', height: 152 }, ctrl => {
+    const el = {
+      pos: 0, t: performance.now(), paused: true, started: false, duration: 0, guard: false,
+      get currentTime() { return (this.pos + (this.paused ? 0 : performance.now() - this.t)) / 1000; },
+      set currentTime(v) { this.pos = Math.max(0, v * 1000); this.t = performance.now(); try { ctrl.seek(Math.max(0, v)); } catch (e) {} },
+      play() { if (this.paused && !this.guard) { this.started ? ctrl.resume() : ctrl.play(); this.started = true; } return Promise.resolve(); },
+      pause() { if (!this.paused && !this.guard) ctrl.pause(); },
+      src: '',
+    };
+    song = { kind: 'spotify', el, ctrl, offset: 60 / bpm, name: 'Spotify' };
+    ctrl.addListener('playback_update', e => {
+      const d = e.data || {}; el.pos = d.position || 0; el.t = performance.now(); el.duration = d.duration || el.duration;
+      const wasPaused = el.paused; el.paused = !!d.isPaused || !!d.isBuffering;
+      // Play/Pause im Spotify-Player selbst → Rueda folgt
+      if (wasPaused !== el.paused) { el.guard = true; if (!el.paused && !running) { el.started = true; setRunning(true); } else if (el.paused && running && !d.isBuffering) setRunning(false); el.guard = false; }
+      if (el.duration && el.duration <= 31000 && !el.previewNoted) { el.previewNoted = true; spInfo(true); }
+    });
+    resetClock(); spInfo(!!el.previewNoted);
+  });
+}
+function spInfo(preview) {
+  info(`🎵 Spotify verbunden · Tempo mit „Tap" mittippen (aktuell ${Math.round(bpm)} BPM), dann auf einer „1" der Musik „Eins!" drücken. <span class="chip" id="rmSong">Spotify entfernen</span>` +
+    (preview ? '<br>⚠︎ Nur 30-Sekunden-Vorschau – im selben Browser bei Spotify einloggen, dann läuft der ganze Song.' : ''));
+  $('#rmSong').addEventListener('click', removeSong);
+}
+$('#spLoad').addEventListener('click', () => { ensureAudio(); loadSpotify($('#spUrl').value); });
+$('#spUrl').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); ensureAudio(); loadSpotify(e.target.value); } });
 const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function estimateBPM(ab) {
@@ -954,7 +1023,12 @@ function one() {
 function loop() {
   const now = performance.now() / 1000; const dt = Math.min(.1, now - lastT); lastT = now;
   if (running) {
-    if (song) { beatPos = Math.max(-1, (song.el.currentTime - song.offset) * bpm / 60); beatBase = beatPos; tBase = now; }
+    if (song) {
+      beatPos = Math.max(-1, (song.el.currentTime - song.offset) * bpm / 60); beatBase = beatPos; tBase = now;
+      // Sprung im Song (z. B. im Player gespult): Zähler neu ausrichten statt alle Beats nachzuholen
+      const kb = Math.floor(beatPos);
+      if (kb < nextBeat - 2 || kb > nextBeat + 16) { fig = null; nextBeat = kb + 1; nextSched = nextBeat; trail = []; for (const d of dancers) plantFeet(d, kb); }
+    }
     else beatPos = beatBase + (now - tBase) * bpm / 60;
     while (Math.floor(beatPos) >= nextBeat) { onBeat(nextBeat); nextBeat++; }
     if ((soundOn || bandActive()) && audio) {
