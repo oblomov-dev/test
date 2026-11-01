@@ -10,7 +10,8 @@ Ein Simulator für Salsa Rueda (Rueda de Casino) im Browser: Paare tanzen im Kre
 - Tanzen **auf 1** oder **auf 2** (contratiempo)
 - Füße mit Fußform, Gewichtsfuß, Spuren, Kollisionswarnung, Hände, Abstandsmaße
 - Figuren: Guapea, Dame, Dame dos, Enchufla, Enchufla doble, Adiós, Exhíbela, Sombrero, Setenta, Arriba, Abajo
-- Musik: eigene Audiodatei (mit Tempoerkennung) oder **Spotify-Link** über den offiziellen Embed-Player – der Zähler läuft synchron zur Abspielposition
+- Musik: eigene Audiodatei oder **Spotify-Link** über den offiziellen Embed-Player – der Zähler läuft synchron zur Abspielposition
+- **Automatische Takterkennung:** Tempo, Beat und die „1“ werden aus der Audiodatei bzw. beim Mithören übers Mikrofon (Spotify, andere Apps, Live-Musik) selbst gefunden
 - Band mit 16 Instrumenten (echte Samples), Partitur mit Betonungszeile, Salsa- und Son-Stil, sechs fertige Songs
 - 3D-Ansicht: Gliederpuppen mit Knie- und Ellbogen-IK, Cuban Motion, frei drehbare Kamera
 - Editor für Schrittfolgen und Figuren (JSON)

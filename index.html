@@ -166,6 +166,15 @@ body.v3d .camHint{display:block;position:absolute;bottom:8px;left:0;right:0;text
           <button class="btn" id="spLoad">Spotify</button>
         </div>
         <div id="spWrap"></div>
+        <div class="row">
+          <button class="btn" id="listen" style="flex:1" title="Hört über das Mikrofon 12 s zu und setzt Tempo und die 1">🎤 Mithören: Tempo &amp; 1 finden</button>
+        </div>
+        <div class="row">
+          <button class="btn" id="swap15" style="flex:1" title="Falls die 5 als 1 erkannt wurde">1 ↔ 5</button>
+          <button class="btn" id="nudgeM" title="Zähler 20 ms früher">−20 ms</button>
+          <button class="btn" id="nudgeP" title="Zähler 20 ms später">+20 ms</button>
+        </div>
+        <div class="hint" id="beatInfo">Läuft Musik aus Spotify, einer anderen App oder live im Raum, kann die Seite über das Mikrofon mithören und Tempo und 1 selbst finden (Lautsprecher, keine Kopfhörer).</div>
         <div class="hint" id="songInfo">Kein Song – das Metronom läuft allein. Lade ein Salsa-Stück von deinem Gerät, das Tempo wird automatisch geschätzt; mit „Tap" korrigierst du es, mit „Eins!" setzt du die Phrase auf die 1.</div>
       </div>
     </details>
@@ -390,7 +399,7 @@ function commitFeet(k) {
 function resetClock() {
   // Ausgangsposition ist die 8: der Zähler startet bei Beat -1, die erste Figur beginnt auf der 1 (Beat 0)
   fig = null; history = []; beatPos = -1; beatBase = -1; nextBeat = -1; nextSched = -1; tBase = performance.now() / 1000;
-  if (song) { song.offset = 60 / bpm; try { song.el.currentTime = 0; } catch (e) {} }
+  if (song) { song.offset = song.detectedOffset ?? 60 / bpm; try { song.el.currentTime = 0; } catch (e) {} }
   trail = [];
   for (const d of dancers) plantFeet(d, -1);
 }
@@ -902,10 +911,17 @@ async function loadSong(file) {
   song = { el, offset: 0, name: file.name };
   resetClock();
   info(`🎵 ${esc(file.name)} · analysiere Tempo …`);
-  let est = null;
-  try { ensureAudio(); const buf = await file.arrayBuffer(); const ab = await audio.decodeAudioData(buf); est = estimateBPM(ab); } catch (e) {}
-  if (est) setBpm(est);
-  info(`🎵 ${esc(file.name)} · ${est ? '≈' + Math.round(est) + ' BPM erkannt' : 'Tempo nicht erkannt – mit Tap setzen'} · <span class="chip" id="rmSong">Song entfernen</span><br>Starten, dann auf einer „1" der Musik „Eins!" drücken.`);
+  let res = null;
+  try {
+    ensureAudio(); const buf = await file.arrayBuffer(), ab = await audio.decodeAudioData(buf);
+    const ch = ab.getChannelData(0), ch2 = ab.numberOfChannels > 1 ? ab.getChannelData(1) : null, mono = ch2 ? ch.map((v, i) => (v + ch2[i]) / 2) : ch;
+    const env = envelopes(mono, ab.sampleRate, 200, 120); res = analyzeRhythm(env.full, env.low, env.fps);
+  } catch (e) {}
+  if (res && song && song.el === el) {
+    setBpm(res.bpm); song.detectedOffset = mod(res.oneTime, 8 * 60 / bpm); resetClock();
+    window.__ruedaFile = { ...res, offset: song.offset };
+  }
+  info(`🎵 ${esc(file.name)} · ${res ? `${Math.round(res.bpm)} BPM, 1 automatisch gesetzt (${confText(res.conf)})` : 'Takt nicht erkannt – Tempo mit „Tap", die 1 mit „Eins!" setzen'} · <span class="chip" id="rmSong">Song entfernen</span>`);
   $('#rmSong').addEventListener('click', removeSong);
 }
 function removeSong() {
@@ -956,6 +972,10 @@ async function loadSpotify(raw) {
       const d = e.data || {}; el.pos = d.position || 0; el.t = performance.now(); el.duration = d.duration || el.duration;
       const wasPaused = el.paused; el.paused = !!d.isPaused || !!d.isBuffering;
       // Play/Pause im Spotify-Player selbst → Rueda folgt
+      // neuer Titel (Playlist/Album): Erkennung erneut nötig
+      if (el.lastDur && d.duration && Math.abs(d.duration - el.lastDur) > 1500) { song.analyzed = false; song.detectedOffset = undefined; el.triedListen = false; }
+      if (d.duration) el.lastDur = d.duration;
+      if (!el.paused && !song.analyzed && !listen && !el.triedListen) { el.triedListen = true; startListening(true); }   // ein Versuch pro Titel
       if (wasPaused !== el.paused) { el.guard = true; if (!el.paused && !running) { el.started = true; setRunning(true); } else if (el.paused && running && !d.isBuffering) setRunning(false); el.guard = false; }
       if (el.duration && el.duration <= 31000 && !el.previewNoted) { el.previewNoted = true; spInfo(true); }
     });
@@ -963,12 +983,171 @@ async function loadSpotify(raw) {
   });
 }
 function spInfo(preview) {
-  info(`🎵 Spotify verbunden · Tempo mit „Tap" mittippen (aktuell ${Math.round(bpm)} BPM), dann auf einer „1" der Musik „Eins!" drücken. <span class="chip" id="rmSong">Spotify entfernen</span>` +
+  info(`🎵 Spotify verbunden · Beim Abspielen hört die Seite 12 s übers Mikrofon mit und setzt Tempo und 1 selbst (Lautsprecher, keine Kopfhörer). Alternativ: „Tap" und „Eins!". <span class="chip" id="rmSong">Spotify entfernen</span>` +
     (preview ? '<br>⚠︎ Nur 30-Sekunden-Vorschau – im selben Browser bei Spotify einloggen, dann läuft der ganze Song.' : ''));
   $('#rmSong').addEventListener('click', removeSong);
 }
 $('#spLoad').addEventListener('click', () => { ensureAudio(); loadSpotify($('#spUrl').value); });
 $('#spUrl').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); ensureAudio(); loadSpotify(e.target.value); } });
+// ---------- Takt-Erkennung: Tempo, Beat-Phase und die „1" ----------
+// Eingabe: Log-Energie pro Frame für das ganze Signal und für den Bassbereich (< 150 Hz).
+// Tempo per Autokorrelation (Vorliebe um 185 BPM), Beat-Phase per Kammfilter, die „1" über das Bass-/Conga-Muster:
+// in Salsa und Son liegen Bass und offene Congas auf der 4 sowie auf 2+ und 4+ – daran wird der Takt ausgerichtet.
+function onsetNorm(e, fps) {
+  const n = e.length, o = new Float32Array(n), ps = new Float64Array(n + 1), out = new Float32Array(n), w = Math.max(2, Math.round(fps * .2));
+  for (let i = 1; i < n; i++) o[i] = Math.max(0, e[i] - e[i - 1]);
+  for (let i = 0; i < n; i++) ps[i + 1] = ps[i] + o[i];
+  for (let i = 0; i < n; i++) { const a = Math.max(0, i - w), b = Math.min(n, i + w + 1); out[i] = Math.max(0, o[i] - (ps[b] - ps[a]) / (b - a)); }
+  return out;
+}
+function analyzeRhythm(full, low, fps) {
+  const n = full.length; if (n < fps * 6) return null;
+  const F = onsetNorm(full, fps), L = onsetNorm(low, fps);
+  // Autokorrelation; der echte Beat wiederholt sich auch nach 2, 4 und 8 Schlägen (Takt, Phrase) – das unterscheidet ihn vom 3-Achtel-Tresillo der Clave
+  const minLag = Math.floor(fps * 60 / 250), maxLag = Math.ceil(fps * 60 / 110), corr = new Float64Array(maxLag + 2), acCache = new Map();
+  const ac = lag => { lag = Math.round(lag); if (lag >= n - 1) return 0; if (acCache.has(lag)) return acCache.get(lag); let s = 0; for (let i = 0; i < n - lag; i++) s += F[i] * F[i + lag]; s /= (n - lag); acCache.set(lag, s); return s; };
+  let best = -1, bl = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    const s = ac(lag) + .5 * ac(2 * lag) + .5 * ac(4 * lag) + .5 * ac(8 * lag); corr[lag] = s;   // 1, 2, 4 und 8 Schläge (Phrase)
+    const prior = Math.exp(-.5 * Math.pow(Math.log2(fps * 60 / lag / 185) / .35, 2));   // Rueda: praktisch immer 150–220 BPM
+    if (s * prior > best) { best = s * prior; bl = lag; }
+  }
+  if (!bl) return null;
+  let P = bl; if (bl > minLag && bl < maxLag) { const a = corr[bl - 1], b = corr[bl], c = corr[bl + 1], den = a - 2 * b + c; if (den) P += .5 * (a - c) / den; }
+  const val = (arr, x) => { const i = Math.round(x); return Math.max(arr[i - 1] || 0, arr[i] || 0, arr[i + 1] || 0); };
+  const at = (arr, x) => { const i = Math.floor(x), f = x - i; return (arr[i] || 0) * (1 - f) + (arr[i + 1] || 0) * f; };
+  let ph0 = 0, bestS = -1;
+  for (let ph = 0; ph < P; ph += .5) { let s = 0; for (let x = ph; x < n - 1; x += P) s += val(F, x); if (s > bestS) { bestS = s; ph0 = ph; } }
+  // Feinabstimmung: Periode und Phase gemeinsam so wählen, dass möglichst alle Anschläge auf dem Raster liegen …
+  {
+    const mid = (n - 1) / 2; let bP = P, bPh = ph0, bS = -1;
+    for (let q = P * .97; q <= P * 1.03; q += P * .0005) {
+      const c0 = ph0 + Math.round((mid - ph0) / P) * P;
+      for (let d = -2; d <= 2; d += .25) {
+        const c = c0 + d; let s = 0;
+        for (let x = c - Math.floor(c / q) * q; x < n - 1; x += q) s += at(F, x);
+        if (s > bS) { bS = s; bP = q; bPh = c - Math.floor(c / q) * q; }
+      }
+    }
+    P = bP; ph0 = bPh;
+  }
+  // … dann jeden Schlag einzeln genau lokalisieren (Spitze des Anschlags, parabolisch interpoliert) und eine Gerade
+  // durch alle Schlagzeiten legen (gewichtet nach Anschlagstärke, zweimal mit Ausreißer-Abwurf): Steigung = Periode.
+  for (const ph of [ph0, ph0 + P / 2]) { if (ph !== ph0) break;
+    const win = Math.max(2, Math.round(P * .22)); let pts = [];
+    for (let i = 0, x = ph; x < n - 2; i++, x += P) {
+      const c = Math.round(x); let bi = -1, bv = 0;
+      for (let j = Math.max(1, c - win); j <= Math.min(n - 2, c + win); j++) if (F[j] > bv && F[j] >= F[j - 1] && F[j] >= F[j + 1]) { bv = F[j]; bi = j; }
+      if (bi < 0) continue;
+      const y0 = F[bi - 1], y1 = F[bi], y2 = F[bi + 1], den = y0 - 2 * y1 + y2, t = bi + (den ? .5 * (y0 - y2) / den : 0);
+      pts.push({ i, t, w: bv });
+    }
+    const fit = ps => { let W = 0, Si = 0, St = 0, Sii = 0, Sit = 0; for (const q of ps) { W += q.w; Si += q.w * q.i; St += q.w * q.t; Sii += q.w * q.i * q.i; Sit += q.w * q.i * q.t; }
+      const den = W * Sii - Si * Si; if (!den) return null; const slope = (W * Sit - Si * St) / den; return { slope, icpt: (St - slope * Si) / W }; };
+    for (let it = 0; it < 3 && pts.length >= 8; it++) {
+      const f = fit(pts); if (!f) break;
+      if (it < 2) { const res = pts.map(q => Math.abs(q.t - (f.icpt + f.slope * q.i))); const lim = Math.max(1.2, [...res].sort((a, b) => a - b)[Math.floor(res.length * .7)] * 2); pts = pts.filter((q, k) => res[k] <= lim); }
+      else if (Math.abs(f.slope / P - 1) < .03) { P = f.slope; ph0 = mod(f.icpt, P); }
+    }
+  }
+  // Takt: Bass/Conga-Muster (stark auf der 4, auf 2+ und 4+). Beide Rasterlagen (Beat bzw. Offbeat) prüfen –
+  // auf den Offbeats ist in Salsa oft viel los; das Muster passt aber nur zur richtigen Lage.
+  const T_on = [.25, .2, .25, 1.3], T_and = [0, 1, 0, .8];
+  let bestR = null;
+  for (const ph of [ph0, ph0 + P / 2]) {
+    const nb = Math.floor((n - 2 - ph) / P); if (nb < 8) continue;
+    const sc = [0, 0, 0, 0];
+    for (let i = 0; i < nb; i++) { const on = val(L, ph + i * P) + .5 * val(F, ph + i * P), and = val(L, ph + i * P + P / 2); for (let r = 0; r < 4; r++) { const j = mod(i - r, 4); sc[r] += T_on[j] * on + T_and[j] * and; } }
+    const order = [0, 1, 2, 3].sort((a, b) => sc[b] - sc[a]), tot = sc[order[0]] / nb;
+    if (!bestR || tot > bestR.tot) bestR = { tot, ph, r: order[0], conf: sc[order[1]] > 0 ? sc[order[0]] / sc[order[1]] : 2, nb };
+  }
+  if (!bestR) return null;
+  return { bpm: fps * 60 / P, oneTime: (bestR.ph + bestR.r * P) / fps, beatTime: bestR.ph / fps, conf: bestR.conf, nb: bestR.nb };
+}
+function envelopes(data, sr, fps, maxSec) {
+  const hop = Math.floor(sr / fps), n = Math.min(Math.floor(data.length / hop), Math.floor((maxSec || 1e9) * fps));
+  const full = new Float32Array(n), low = new Float32Array(n), a = Math.exp(-2 * Math.PI * 150 / sr); let y = 0;
+  for (let k = 0; k < n; k++) { let sf = 0, sl = 0; const o = k * hop; for (let j = 0; j < hop; j++) { const v = data[o + j]; sf += v * v; y = (1 - a) * v + a * y; sl += y * y; }
+    full[k] = sf / hop; low[k] = sl / hop; }
+  const f = sr / hop; return { full: smoothLog(full, f), low: smoothLog(low, f), fps: f };
+}
+// Energie über ~25 ms glätten, dann logarithmieren (sonst flackert die Energie innerhalb einer Bass-Schwingung)
+function smoothLog(e, fps) {
+  const n = e.length, k = Math.max(1, Math.round(.025 * fps)), h = k >> 1, ps = new Float64Array(n + 1), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) ps[i + 1] = ps[i] + e[i];
+  for (let i = 0; i < n; i++) { const a = Math.max(0, i - h), b = Math.min(n, i - h + k); out[i] = Math.log(1e-9 + (ps[b] - ps[a]) / (b - a)); }
+  return out;
+}
+const confText = c => c > 1.35 ? 'sicher' : c > 1.12 ? 'ziemlich sicher' : 'unsicher – ggf. „1 ↔ 5" oder „Eins!"';
+const beatInfo = t => { $('#beatInfo').innerHTML = t; };
+// Zähler neu ausrichten (nach Tempo-/Phasenänderung): Figur abbrechen, Füße an der neuen Stelle neu aufstellen
+function realign() { const kb = Math.floor(beatPos); fig = null; nextBeat = kb + 1; nextSched = nextBeat; trail = []; for (const d of dancers) plantFeet(d, kb); updateUI(); }
+function shiftBeats(db) {
+  if (song) song.offset -= db * 60 / bpm; else { beatBase += db; beatPos += db; }
+  if (!song) realign();   // mit Song richtet die Hauptschleife bei größeren Sprüngen selbst aus
+}
+// Ein erkanntes „1" (Zeitpunkt p1, performance-Sekunden) auf den Zähler legen
+function applyOne(newBpm, p1) {
+  const nowS = performance.now() / 1000;
+  setBpm(newBpm);
+  if (song) {
+    const songT1 = song.el.currentTime - (nowS - p1), cur = (songT1 - song.offset) * bpm / 60, target = 8 * Math.round(cur / 8);
+    song.offset = songT1 - target * 60 / bpm; song.detectedOffset = mod(song.offset, 8 * 60 / bpm);
+    beatPos = Math.max(-1, (song.el.currentTime - song.offset) * bpm / 60); beatBase = beatPos; tBase = nowS;
+  } else {
+    const cur = beatPos - (nowS - p1) * bpm / 60, target = 8 * Math.round(cur / 8);
+    beatPos = target + (nowS - p1) * bpm / 60; beatBase = beatPos; tBase = nowS;
+  }
+  realign();
+}
+// Mithören über das Mikrofon
+let listen = null; const LISTEN_SEC = 12, MIC_LAT = .05;
+async function startListening(auto) {
+  if (listen) return;
+  ensureAudio(); if (!audio) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { beatInfo('Mikrofon wird in diesem Browser nicht unterstützt. Tempo mit „Tap", die 1 mit „Eins!" setzen.'); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } }); }
+  catch (e) { beatInfo('Kein Zugriff aufs Mikrofon (' + esc(e.name || 'abgelehnt') + '). In der Claude-Vorschau ist das Mikrofon gesperrt – auf der GitHub-Page fragt der Browser nach Erlaubnis.'); return; }
+  const sr = audio.sampleRate, BS = 512, src = audio.createMediaStreamSource(stream), sp = audio.createScriptProcessor(BS, 1, 1), sink = audio.createGain();
+  sink.gain.value = 0; const a = Math.exp(-2 * Math.PI * 150 / sr); let y = 0;
+  const L = listen = { stream, src, sp, sink, full: [], low: [], t0: null };
+  sp.onaudioprocess = e => {
+    const x = e.inputBuffer.getChannelData(0); let sf = 0, sl = 0;
+    for (let i = 0; i < x.length; i++) { const v = x[i]; sf += v * v; y = (1 - a) * v + a * y; sl += y * y; }
+    if (L.t0 === null) L.t0 = audio.currentTime - BS / sr;      // Aufnahmezeit des ersten Blocks (AudioContext-Zeit)
+    L.full.push(sf / x.length); L.low.push(sl / x.length);
+  };
+  src.connect(sp); sp.connect(sink).connect(audio.destination);
+  $('#listen').classList.add('on');
+  const fps = sr / BS, tick = setInterval(() => {
+    const sec = L.full.length / fps;
+    if (sec < LISTEN_SEC) { beatInfo(`🎤 Höre zu … ${Math.max(0, Math.ceil(LISTEN_SEC - sec))} s ${auto ? '(automatisch gestartet)' : ''} – Musik laut genug laufen lassen.`); return; }
+    clearInterval(tick); stopListening();
+    const res = analyzeRhythm(smoothLog(Float32Array.from(L.full), fps), smoothLog(Float32Array.from(L.low), fps), fps);
+    window.__ruedaListen = res && { ...res, t0: L.t0 };
+    if (!res) { beatInfo('Kein klarer Takt gehört. Lauter stellen, näher an den Lautsprecher, oder Tempo mit „Tap" setzen.'); return; }
+    // AudioContext-Zeit → performance-Zeit
+    const ts = audio.getOutputTimestamp ? audio.getOutputTimestamp() : null;
+    const ctxToPerf = t => ts && ts.performanceTime ? ts.performanceTime / 1000 - (ts.contextTime - t) : performance.now() / 1000 - (audio.currentTime - t);
+    const bar = 4 * 60 / res.bpm, nowCtx = audio.currentTime;
+    let t1 = L.t0 + res.oneTime - MIC_LAT; t1 += bar * Math.floor((nowCtx - t1) / bar);
+    applyOne(res.bpm, ctxToPerf(t1));
+    if (song) song.analyzed = true;
+    if (!running) setRunning(true);
+    beatInfo(`🎤 Erkannt: ${Math.round(res.bpm)} BPM, 1 gesetzt (${confText(res.conf)}). Feinabgleich mit −/+ 20 ms, „1 ↔ 5" falls die Schritte gespiegelt wirken.`);
+  }, 400);
+  L.tick = tick;
+}
+function stopListening() {
+  if (!listen) return;
+  try { listen.sp.disconnect(); listen.src.disconnect(); listen.sink.disconnect(); } catch (e) {}
+  listen.stream.getTracks().forEach(t => t.stop()); clearInterval(listen.tick); listen = null; $('#listen').classList.remove('on');
+}
+$('#listen').addEventListener('click', () => listen ? (stopListening(), beatInfo('Mithören abgebrochen.')) : startListening(false));
+$('#swap15').addEventListener('click', () => shiftBeats(4));
+$('#nudgeM').addEventListener('click', () => shiftBeats(-.02 * bpm / 60));
+$('#nudgeP').addEventListener('click', () => shiftBeats(.02 * bpm / 60));
 const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 function estimateBPM(ab) {
